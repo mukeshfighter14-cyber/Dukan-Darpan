@@ -1,0 +1,1405 @@
+name: Build SuperBazaar Shopping & Food APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Generate SuperBazaar Android Project
+        run: |
+          mkdir -p app/src/main/java/com/example/superbazaar
+
+          cat << 'EOF' > gradle.properties
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          EOF
+
+          cat << 'EOF' > settings.gradle.kts
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "SuperBazaar"
+          include(":app")
+          EOF
+
+          cat << 'EOF' > build.gradle.kts
+          plugins {
+              id("com.android.application") version "8.2.0" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.20" apply false
+          }
+          EOF
+
+          cat << 'EOF' > app/build.gradle.kts
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.superbazaar"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.example.superbazaar"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+
+          dependencies {
+              implementation("androidx.core:core-ktx:1.12.0")
+              implementation("androidx.appcompat:appcompat:1.6.1")
+              implementation("com.google.android.material:material:1.11.0")
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.VIEW" />
+                      <data android:scheme="upi" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.intent.action.VIEW" />
+                      <data android:scheme="https" />
+                  </intent>
+              </queries>
+
+              <application
+                  android:allowBackup="true"
+                  android:label="Apna SuperBazaar"
+                  android:supportsRtl="true"
+                  android:theme="@style/Theme.AppCompat.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+              </application>
+          </manifest>
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/example/superbazaar/MainActivity.kt
+          package com.example.superbazaar
+
+          import android.app.AlertDialog
+          import android.content.Context
+          import android.content.Intent
+          import android.content.SharedPreferences
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.net.Uri
+          import android.os.Bundle
+          import android.text.Editable
+          import android.text.InputType
+          import android.text.TextWatcher
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.*
+          import androidx.appcompat.app.AppCompatActivity
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.text.SimpleDateFormat
+          import java.util.*
+
+          data class Product(
+              val id: String,
+              val name: String,
+              val category: String,
+              val price: Int,
+              val mrp: Int,
+              val time: String,
+              val rating: String,
+              val desc: String,
+              val emoji: String
+          )
+
+          data class OrderRecord(
+              val orderId: String,
+              val itemsSummary: String,
+              val totalAmount: Int,
+              val customerName: String,
+              val customerPhone: String,
+              val address: String,
+              val paymentMode: String,
+              val time: String,
+              var statusIndex: Int
+          )
+
+          class MainActivity : AppCompatActivity() {
+
+              private lateinit var prefs: SharedPreferences
+              private val products = mutableListOf<Product>()
+              private val cart = mutableMapOf<String, Int>()
+              private val orders = mutableListOf<OrderRecord>()
+
+              private var selectedCategory = "सभी (All)"
+              private var searchQuery = ""
+              private var fastDeliveryOnly = false
+              private var couponApplied = false
+
+              private lateinit var shopTitleText: TextView
+              private lateinit var shopSubText: TextView
+              private lateinit var productListLayout: LinearLayout
+              private lateinit var bottomCartBar: LinearLayout
+              private lateinit var cartSummaryText: TextView
+              private lateinit var categoryRow: LinearLayout
+
+              private val categories = listOf(
+                  "सभी (All)",
+                  "🍔 फूड (Food)",
+                  "🥦 किराना (Grocery)",
+                  "🛍️ शॉपिंग (Store)"
+              )
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  prefs = getSharedPreferences("super_bazaar_prefs", Context.MODE_PRIVATE)
+
+                  loadCatalogAndOrders()
+                  buildMainScreen()
+                  refreshProductList()
+                  updateCartBar()
+              }
+
+              private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+              private fun createBg(
+                  colorHex: String,
+                  radiusDp: Int,
+                  strokeHex: String? = null,
+                  strokeWidthDp: Int = 0
+              ): GradientDrawable {
+                  return GradientDrawable().apply {
+                      shape = GradientDrawable.RECTANGLE
+                      cornerRadius = dp(radiusDp).toFloat()
+                      setColor(Color.parseColor(colorHex))
+                      if (strokeHex != null && strokeWidthDp > 0) {
+                          setStroke(dp(strokeWidthDp), Color.parseColor(strokeHex))
+                      }
+                  }
+              }
+
+              private fun loadCatalogAndOrders() {
+                  val savedProducts = prefs.getString("products_json", null)
+                  if (savedProducts.isNullOrEmpty()) {
+                      seedDefaultProducts()
+                      saveProductsToPrefs()
+                  } else {
+                      products.clear()
+                      val arr = JSONArray(savedProducts)
+                      for (i in 0 until arr.length()) {
+                          val o = arr.getJSONObject(i)
+                          products.add(
+                              Product(
+                                  id = o.optString("id"),
+                                  name = o.optString("name"),
+                                  category = o.optString("category"),
+                                  price = o.optInt("price"),
+                                  mrp = o.optInt("mrp"),
+                                  time = o.optString("time"),
+                                  rating = o.optString("rating", "4.5"),
+                                  desc = o.optString("desc"),
+                                  emoji = o.optString("emoji", "🛍️")
+                              )
+                          )
+                      }
+                  }
+
+                  orders.clear()
+                  val savedOrders = prefs.getString("orders_json", null)
+                  if (!savedOrders.isNullOrEmpty()) {
+                      val arr = JSONArray(savedOrders)
+                      for (i in 0 until arr.length()) {
+                          val o = arr.getJSONObject(i)
+                          orders.add(
+                              OrderRecord(
+                                  orderId = o.optString("orderId"),
+                                  itemsSummary = o.optString("itemsSummary"),
+                                  totalAmount = o.optInt("totalAmount"),
+                                  customerName = o.optString("customerName"),
+                                  customerPhone = o.optString("customerPhone"),
+                                  address = o.optString("address"),
+                                  paymentMode = o.optString("paymentMode"),
+                                  time = o.optString("time"),
+                                  statusIndex = o.optInt("statusIndex", 0)
+                              )
+                          )
+                      }
+                  }
+              }
+
+              private fun seedDefaultProducts() {
+                  products.clear()
+                  products.addAll(
+                      listOf(
+                          Product("p1", "स्पेशल पनीर बटर मसाला थाली", "🍔 फूड (Food)", 140, 180, "25 mins", "4.8", "4 बटर रोटी, पनीर मसाला, दाल फ्राई, जीरा राइस और सलाद", "🍛"),
+                          Product("p2", "क्रिस्पी वेज चीज बर्गर + फ्राइज", "🍔 फूड (Food)", 99, 139, "20 mins", "4.6", "ताज़ा चीज़ बर्गर, फ्रेंच फ्राइज और कोल्ड कॉफी/कोक कॉम्बो", "🍔"),
+                          Product("p3", "गर्मागर्म राजस्थानी दाल-बाटी चूरमा", "🍔 फूड (Food)", 160, 210, "30 mins", "4.9", "देसी घी की 3 बाटी, पंचमेल दाल, स्पेशल चूरमा और लहसुन चटनी", "🥘"),
+                          Product("p4", "साउथ इंडियन मसाला डोसा", "🍔 फूड (Food)", 85, 110, "20 mins", "4.5", "क्रिस्पी मसाला डोसा, गरमागरम सांभर और नारियल चटनी के साथ", "🥞"),
+                          Product("p5", "शुद्ध देसी घी (Pure Desi Ghee - 500ml)", "🥦 किराना (Grocery)", 320, 380, "15 mins", "4.9", "100% शुद्ध और दानेदार देसी घी - घर तक तुरंत डिलीवरी", "🧈"),
+                          Product("p6", "प्रीमियम बासमती चावल (5 Kg पैक)", "🥦 किराना (Grocery)", 440, 550, "20 mins", "4.7", "लंबे दाने वाला खुशबूदार बिरयानी और पुलाव बासमती राइस", "🌾"),
+                          Product("p7", "चाय-नाश्ता फैमिली कॉम्बो पैक", "🥦 किराना (Grocery)", 175, 220, "15 mins", "4.6", "250g प्रीमियम चाय पत्ती + 400g भुजिया नमकीन + कुकीज़ पैक", "☕"),
+                          Product("p8", "वायरलेस ब्लूटूथ ईयरबड्स (TWS Pro)", "🛍️ शॉपिंग (Store)", 499, 999, "Same Day", "4.5", "डीप बास, 24 घंटे बैटरी बैकअप और टच कंट्रोल के साथ", "🎧"),
+                          Product("p9", "सुपरफास्ट मोबाइल चार्जर + केबल", "🛍️ शॉपिंग (Store)", 249, 499, "Same Day", "4.4", "सभी Android फोन के लिए Type-C फास्ट चार्जिंग एडेप्टर", "🔌"),
+                          Product("p10", "स्टेनलेस स्टील थर्मस बॉटल (1 Litre)", "🛍️ शॉपिंग (Store)", 220, 350, "Same Day", "4.7", "24 घंटे ठंडा और गर्म रखने वाली मजबूत स्टील बोतल", "🍼")
+                      )
+                  )
+              }
+
+              private fun saveProductsToPrefs() {
+                  val arr = JSONArray()
+                  for (p in products) {
+                      val o = JSONObject().apply {
+                          put("id", p.id)
+                          put("name", p.name)
+                          put("category", p.category)
+                          put("price", p.price)
+                          put("mrp", p.mrp)
+                          put("time", p.time)
+                          put("rating", p.rating)
+                          put("desc", p.desc)
+                          put("emoji", p.emoji)
+                      }
+                      arr.put(o)
+                  }
+                  prefs.edit().putString("products_json", arr.toString()).apply()
+              }
+
+              private fun saveOrdersToPrefs() {
+                  val arr = JSONArray()
+                  for (ord in orders) {
+                      val o = JSONObject().apply {
+                          put("orderId", ord.orderId)
+                          put("itemsSummary", ord.itemsSummary)
+                          put("totalAmount", ord.totalAmount)
+                          put("customerName", ord.customerName)
+                          put("customerPhone", ord.customerPhone)
+                          put("address", ord.address)
+                          put("paymentMode", ord.paymentMode)
+                          put("time", ord.time)
+                          put("statusIndex", ord.statusIndex)
+                      }
+                      arr.put(o)
+                  }
+                  prefs.edit().putString("orders_json", arr.toString()).apply()
+              }
+
+              private fun buildMainScreen() {
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setBackgroundColor(Color.parseColor("#F4F6F9"))
+                      layoutParams = ViewGroup.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.MATCH_PARENT
+                      )
+                  }
+
+                  // 1. Top Header Bar (Swiggy/Zomato Red-Orange Theme)
+                  val header = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setBackgroundColor(Color.parseColor("#E23744"))
+                      setPadding(dp(14), dp(14), dp(14), dp(14))
+                  }
+
+                  val topRow = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                  }
+
+                  val titleBox = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                  }
+
+                  val shopName = prefs.getString("shop_name", "अपना सुपर बाज़ार & फूड हब") ?: "अपना सुपर बाज़ार & फूड हब"
+                  val freeLimit = prefs.getInt("free_delivery_limit", 299)
+
+                  shopTitleText = TextView(this).apply {
+                      text = "🏪 $shopName"
+                      textSize = 18f
+                      setTypeface(null, Typeface.BOLD)
+                      setTextColor(Color.WHITE)
+                  }
+
+                  shopSubText = TextView(this).apply {
+                      text = "📍 होम डिलीवरी उपलब्ध | ₹$freeLimit+ पर फ्री डिलीवरी"
+                      textSize = 12f
+                      setTextColor(Color.parseColor("#FFEBF0"))
+                  }
+
+                  titleBox.addView(shopTitleText)
+                  titleBox.addView(shopSubText)
+
+                  val ordersBtn = TextView(this).apply {
+                      text = "📦 ऑर्डर"
+                      textSize = 12f
+                      setTypeface(null, Typeface.BOLD)
+                      setTextColor(Color.parseColor("#E23744"))
+                      background = createBg("#FFFFFF", 8)
+                      setPadding(dp(10), dp(7), dp(10), dp(7))
+                      setOnClickListener { showOrdersDialog() }
+                  }
+
+                  val adminBtn = TextView(this).apply {
+                      text = "👑 मालिक पैनल"
+                      textSize = 12f
+                      setTypeface(null, Typeface.BOLD)
+                      setTextColor(Color.WHITE)
+                      background = createBg("#1F2937", 8)
+                      setPadding(dp(10), dp(7), dp(10), dp(7))
+                      val lp = LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.WRAP_CONTENT,
+                          ViewGroup.LayoutParams.WRAP_CONTENT
+                      )
+                      lp.leftMargin = dp(8)
+                      layoutParams = lp
+                      setOnClickListener { showAdminPinDialog() }
+                  }
+
+                  topRow.addView(titleBox)
+                  topRow.addView(ordersBtn)
+                  topRow.addView(adminBtn)
+                  header.addView(topRow)
+
+                  // Search Bar inside Header
+                  val searchInput = EditText(this).apply {
+                      hint = "🔍 खाना, किराना या कोई भी सामान खोजें..."
+                      textSize = 14f
+                      setTextColor(Color.BLACK)
+                      setHintTextColor(Color.DKGRAY)
+                      background = createBg("#FFFFFF", 10)
+                      setPadding(dp(12), dp(10), dp(12), dp(10))
+                      val lp = LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.WRAP_CONTENT
+                      )
+                      lp.topMargin = dp(10)
+                      layoutParams = lp
+                      addTextChangedListener(object : TextWatcher {
+                          override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                          override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                              searchQuery = s?.toString()?.trim() ?: ""
+                              refreshProductList()
+                          }
+                          override fun afterTextChanged(s: Editable?) {}
+                      })
+                  }
+                  header.addView(searchInput)
+                  root.addView(header)
+
+                  // 2. Scrollable Content Area
+                  val scrollView = ScrollView(this).apply {
+                      layoutParams = LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          0,
+                          1f
+                      )
+                  }
+
+                  val contentContainer = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(12), dp(10), dp(12), dp(20))
+                  }
+
+                  // Promo Offer Banner (Amazon/Swiggy Style)
+                  val promoBanner = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      background = createBg("#FFF3CD", 12, "#FFCA28", 1)
+                      setPadding(dp(14), dp(10), dp(14), dp(10))
+                  }
+
+                  val promoTitle = TextView(this).apply {
+                      text = "🎉 मेगा ऑफर: कूपन कोड WELCOME50 लगाएं और ₹50 की सीधी छूट पाएं!"
+                      textSize = 13f
+                      setTypeface(null, Typeface.BOLD)
+                      setTextColor(Color.parseColor("#856404"))
+                  }
+
+                  val promoSub = TextView(this).apply {
+                      text = "⚡ फूड ऑर्डर 20-30 मिनट में | 🛍️ किराना और सामान सीधे आपके घर"
+                      textSize = 11f
+                      setTextColor(Color.parseColor("#533F03"))
+                  }
+
+                  promoBanner.addView(promoTitle)
+                  promoBanner.addView(promoSub)
+                  contentContainer.addView(promoBanner)
+
+                  // Category Filter Scroll
+                  val catScroll = HorizontalScrollView(this).apply {
+                      isHorizontalScrollBarEnabled = false
+                      val lp = LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.WRAP_CONTENT
+                      )
+                      lp.topMargin = dp(10)
+                      lp.bottomMargin = dp(6)
+                      layoutParams = lp
+                  }
+
+                  categoryRow = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                  }
+                  catScroll.addView(categoryRow)
+                  contentContainer.addView(catScroll)
+                  renderCategoryChips()
+
+                  // Fast Delivery Filter Toggle
+                  val filterRow = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      setPadding(dp(2), dp(4), dp(2), dp(8))
+                  }
+
+                  val fastCheck = CheckBox(this).apply {
+                      text = "⚡ सिर्फ 30 मिनट से कम वाली फास्ट डिलीवरी दिखाएं"
+                      textSize = 12f
+                      setTextColor(Color.parseColor("#374151"))
+                      setOnCheckedChangeListener { _, isChecked ->
+                          fastDeliveryOnly = isChecked
+                          refreshProductList()
+                      }
+                  }
+                  filterRow.addView(fastCheck)
+                  contentContainer.addView(filterRow)
+
+                  // Product Catalog List Container
+                  productListLayout = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                  }
+                  contentContainer.addView(productListLayout)
+
+                  scrollView.addView(contentContainer)
+                  root.addView(scrollView)
+
+                  // 3. Sticky Bottom Cart Bar (Swiggy/Zomato Style)
+                  bottomCartBar = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      setBackgroundColor(Color.parseColor("#16A34A"))
+                      setPadding(dp(16), dp(12), dp(16), dp(12))
+                      visibility = View.GONE
+                  }
+
+                  cartSummaryText = TextView(this).apply {
+                      text = "🛒 0 आइटम | ₹0"
+                      textSize = 15f
+                      setTypeface(null, Typeface.BOLD)
+                      setTextColor(Color.WHITE)
+                      layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                  }
+
+                  val checkoutBtn = TextView(this).apply {
+                      text = "कार्ट देखें और ऑर्डर करें ➔"
+                      textSize = 14f
+                      setTypeface(null, Typeface.BOLD)
+                      setTextColor(Color.parseColor("#16A34A"))
+                      background = createBg("#FFFFFF", 8)
+                      setPadding(dp(14), dp(8), dp(14), dp(8))
+                      setOnClickListener { showCartAndCheckoutDialog() }
+                  }
+
+                  bottomCartBar.addView(cartSummaryText)
+                  bottomCartBar.addView(checkoutBtn)
+                  root.addView(bottomCartBar)
+
+                  setContentView(root)
+              }
+
+              private fun renderCategoryChips() {
+                  categoryRow.removeAllViews()
+                  for (cat in categories) {
+                      val isSelected = (cat == selectedCategory)
+                      val chip = TextView(this).apply {
+                          text = cat
+                          textSize = 13f
+                          setTypeface(null, Typeface.BOLD)
+                          setTextColor(if (isSelected) Color.WHITE else Color.parseColor("#374151"))
+                          background = createBg(
+                              if (isSelected) "#E23744" else "#FFFFFF",
+                              20,
+                              if (isSelected) "#E23744" else "#D1D5DB",
+                              1
+                          )
+                          setPadding(dp(14), dp(8), dp(14), dp(8))
+                          val lp = LinearLayout.LayoutParams(
+                              ViewGroup.LayoutParams.WRAP_CONTENT,
+                              ViewGroup.LayoutParams.WRAP_CONTENT
+                          )
+                          lp.rightMargin = dp(8)
+                          layoutParams = lp
+                          setOnClickListener {
+                              selectedCategory = cat
+                              renderCategoryChips()
+                              refreshProductList()
+                          }
+                      }
+                      categoryRow.addView(chip)
+                  }
+              }
+
+              private fun refreshProductList() {
+                  val shopName = prefs.getString("shop_name", "अपना सुपर बाज़ार & फूड हब") ?: "अपना सुपर बाज़ार & फूड हब"
+                  val freeLimit = prefs.getInt("free_delivery_limit", 299)
+                  shopTitleText.text = "🏪 $shopName"
+                  shopSubText.text = "📍 होम डिलीवरी उपलब्ध | ₹$freeLimit+ पर फ्री डिलीवरी"
+
+                  productListLayout.removeAllViews()
+
+                  val filtered = products.filter { p ->
+                      val matchCat = (selectedCategory == "सभी (All)" || p.category == selectedCategory)
+                      val matchSearch = (searchQuery.isEmpty() ||
+                              p.name.contains(searchQuery, ignoreCase = true) ||
+                              p.desc.contains(searchQuery, ignoreCase = true) ||
+                              p.category.contains(searchQuery, ignoreCase = true))
+                      val matchFast = (!fastDeliveryOnly || p.time.contains("min", ignoreCase = true))
+                      matchCat && matchSearch && matchFast
+                  }
+
+                  if (filtered.isEmpty()) {
+                      val emptyView = TextView(this).apply {
+                          text = "😕 इस कैटेगरी या सर्च में कोई सामान नहीं मिला।\nआप ऊपर '👑 मालिक पैनल' से नया सामान जोड़ सकते हैं!"
+                          textSize = 14f
+                          gravity = Gravity.CENTER
+                          setTextColor(Color.GRAY)
+                          setPadding(dp(20), dp(40), dp(20), dp(40))
+                      }
+                      productListLayout.addView(emptyView)
+                      return
+                  }
+
+                  for (item in filtered) {
+                      productListLayout.addView(createProductCard(item))
+                  }
+              }
+
+              private fun createProductCard(item: Product): View {
+                  val card = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      background = createBg("#FFFFFF", 12, "#E5E7EB", 1)
+                      setPadding(dp(12), dp(12), dp(12), dp(12))
+                      val lp = LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.WRAP_CONTENT
+                      )
+                      lp.bottomMargin = dp(10)
+                      layoutParams = lp
+                  }
+
+                  // Left Emoji / Thumbnail Box
+                  val iconBox = TextView(this).apply {
+                      text = item.emoji
+                      textSize = 32f
+                      gravity = Gravity.CENTER
+                      background = createBg("#FFF5F5", 12)
+                      layoutParams = LinearLayout.LayoutParams(dp(70), dp(70))
+                  }
+
+                  // Middle Details Box
+                  val infoBox = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                          leftMargin = dp(12)
+                          rightMargin = dp(8)
+                      }
+                  }
+
+                  val badgeRow = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                  }
+
+                  val ratingBadge = TextView(this).apply {
+                      text = "★ ${item.rating}"
+                      textSize = 11f
+                      setTypeface(null, Typeface.BOLD)
+                      setTextColor(Color.WHITE)
+                      background = createBg("#15803D", 6)
+                      setPadding(dp(6), dp(2), dp(6), dp(2))
+                  }
+
+                  val timeBadge = TextView(this).apply {
+                      text = "  ⚡ ${item.time}  •  ${item.category}"
+                      textSize = 11f
+                      setTextColor(Color.parseColor("#6B7280"))
+                  }
+
+                  badgeRow.addView(ratingBadge)
+                  badgeRow.addView(timeBadge)
+
+                  val titleText = TextView(this).apply {
+                      text = item.name
+                      textSize = 15f
+                      setTypeface(null, Typeface.BOLD)
+                      setTextColor(Color.parseColor("#111827"))
+                      setPadding(0, dp(4), 0, dp(2))
+                  }
+
+                  val descText = TextView(this).apply {
+                      text = item.desc
+                      textSize = 12f
+                      setTextColor(Color.parseColor("#6B7280"))
+                  }
+
+                  val priceRow = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      setPadding(0, dp(6), 0, 0)
+                  }
+
+                  val priceText = TextView(this).apply {
+                      text = "₹${item.price}"
+                      textSize = 16f
+                      setTypeface(null, Typeface.BOLD)
+                      setTextColor(Color.parseColor("#111827"))
+                  }
+                  priceRow.addView(priceText)
+
+                  if (item.mrp > item.price) {
+                      val mrpText = TextView(this).apply {
+                          text = "  ₹${item.mrp}"
+                          textSize = 12f
+                          setTextColor(Color.GRAY)
+                          paintFlags = paintFlags or Paint.STRIKE_THRU_TEXT_FLAG
+                      }
+                      val discountPct = ((item.mrp - item.price) * 100) / item.mrp
+                      val offText = TextView(this).apply {
+                          text = "  ($discountPct% छूट)"
+                          textSize = 12f
+                          setTypeface(null, Typeface.BOLD)
+                          setTextColor(Color.parseColor("#E23744"))
+                      }
+                      priceRow.addView(mrpText)
+                      priceRow.addView(offText)
+                  }
+
+                  infoBox.addView(badgeRow)
+                  infoBox.addView(titleText)
+                  infoBox.addView(descText)
+                  infoBox.addView(priceRow)
+
+                  // Right Add / Quantity Box
+                  val actionBox = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER
+                      layoutParams = LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.WRAP_CONTENT,
+                          ViewGroup.LayoutParams.WRAP_CONTENT
+                      ).apply {
+                          gravity = Gravity.CENTER_VERTICAL
+                      }
+                  }
+
+                  val currentQty = cart[item.id] ?: 0
+                  if (currentQty == 0) {
+                      val addBtn = TextView(this).apply {
+                          text = "+ ADD"
+                          textSize = 13f
+                          setTypeface(null, Typeface.BOLD)
+                          setTextColor(Color.parseColor("#E23744"))
+                          background = createBg("#FFF1F2", 8, "#E23744", 1)
+                          setPadding(dp(16), dp(8), dp(16), dp(8))
+                          setOnClickListener {
+                              cart[item.id] = 1
+                              refreshProductList()
+                              updateCartBar()
+                          }
+                      }
+                      actionBox.addView(addBtn)
+                  } else {
+                      val qtyControl = LinearLayout(this).apply {
+                          orientation = LinearLayout.HORIZONTAL
+                          gravity = Gravity.CENTER_VERTICAL
+                          background = createBg("#E23744", 8)
+                      }
+
+                      val minusBtn = TextView(this).apply {
+                          text = " − "
+                          textSize = 16f
+                          setTypeface(null, Typeface.BOLD)
+                          setTextColor(Color.WHITE)
+                          setPadding(dp(10), dp(6), dp(8), dp(6))
+                          setOnClickListener {
+                              val q = (cart[item.id] ?: 0) - 1
+                              if (q <= 0) cart.remove(item.id) else cart[item.id] = q
+                              refreshProductList()
+                              updateCartBar()
+                          }
+                      }
+
+                      val qtyLabel = TextView(this).apply {
+                          text = "$currentQty"
+                          textSize = 14f
+                          setTypeface(null, Typeface.BOLD)
+                          setTextColor(Color.WHITE)
+                          setPadding(dp(4), dp(6), dp(4), dp(6))
+                      }
+
+                      val plusBtn = TextView(this).apply {
+                          text = " + "
+                          textSize = 16f
+                          setTypeface(null, Typeface.BOLD)
+                          setTextColor(Color.WHITE)
+                          setPadding(dp(8), dp(6), dp(10), dp(6))
+                          setOnClickListener {
+                              cart[item.id] = (cart[item.id] ?: 0) + 1
+                              refreshProductList()
+                              updateCartBar()
+                          }
+                      }
+
+                      qtyControl.addView(minusBtn)
+                      qtyControl.addView(qtyLabel)
+                      qtyControl.addView(plusBtn)
+                      actionBox.addView(qtyControl)
+                  }
+
+                  card.addView(iconBox)
+                  card.addView(infoBox)
+                  card.addView(actionBox)
+                  return card
+              }
+
+              private fun updateCartBar() {
+                  var totalItems = 0
+                  var totalPrice = 0
+                  for ((id, qty) in cart) {
+                      val prod = products.find { it.id == id } ?: continue
+                      totalItems += qty
+                      totalPrice += (prod.price * qty)
+                  }
+
+                  if (totalItems > 0) {
+                      bottomCartBar.visibility = View.VISIBLE
+                      cartSummaryText.text = "🛒 $totalItems आइटम | कुल ₹$totalPrice"
+                  } else {
+                      bottomCartBar.visibility = View.GONE
+                      couponApplied = false
+                  }
+              }
+
+              private fun showCartAndCheckoutDialog() {
+                  if (cart.isEmpty()) return
+
+                  val scroll = ScrollView(this)
+                  val container = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(18), dp(14), dp(18), dp(14))
+                  }
+                  scroll.addView(container)
+
+                  var itemTotal = 0
+                  var mrpTotal = 0
+                  val summaryLines = mutableListOf<String>()
+
+                  for ((id, qty) in cart) {
+                      val prod = products.find { it.id == id } ?: continue
+                      val linePrice = prod.price * qty
+                      itemTotal += linePrice
+                      mrpTotal += (prod.mrp * qty)
+                      summaryLines.add("• ${prod.name} x $qty = ₹$linePrice")
+
+                      val row = TextView(this).apply {
+                          text = "${prod.emoji} ${prod.name}  (x$qty)  —  ₹$linePrice"
+                          textSize = 14f
+                          setTextColor(Color.BLACK)
+                          setPadding(0, dp(4), 0, dp(4))
+                      }
+                      container.addView(row)
+                  }
+
+                  val freeLimit = prefs.getInt("free_delivery_limit", 299)
+                  val baseDeliveryFee = prefs.getInt("delivery_fee", 30)
+                  val deliveryFee = if (itemTotal >= freeLimit) 0 else baseDeliveryFee
+                  val couponDiscount = if (couponApplied && itemTotal >= 150) 50 else 0
+                  val grandTotal = (itemTotal + deliveryFee - couponDiscount).coerceAtLeast(1)
+                  val totalSavings = (mrpTotal - itemTotal).coerceAtLeast(0) + couponDiscount
+
+                  val couponBtn = Button(this).apply {
+                      text = if (couponApplied) "✅ WELCOME50 कूपन लगा हुआ है (₹50 की छूट)" else "🎟️ WELCOME50 कूपन लगाएं (₹150+ ऑर्डर पर ₹50 छूट)"
+                      setOnClickListener {
+                          if (itemTotal < 150) {
+                              Toast.makeText(this@MainActivity, "कूपन के लिए कम से कम ₹150 का सामान जोड़ें", Toast.LENGTH_SHORT).show()
+                          } else {
+                              couponApplied = !couponApplied
+                              showCartAndCheckoutDialog()
+                          }
+                      }
+                  }
+
+                  val billBox = TextView(this).apply {
+                      text = "\n🧾 बिल विवरण (Bill Summary):\n" +
+                              "आइटम का कुल मूल्य: ₹$itemTotal\n" +
+                              "डिलीवरी चार्ज: ${if (deliveryFee == 0) "FREE (₹0)" else "₹$deliveryFee"}\n" +
+                              "कूपन छूट: -₹$couponDiscount\n" +
+                              "────────────────────\n" +
+                              "कुल देय राशि (Grand Total): ₹$grandTotal\n" +
+                              "🎉 इस ऑर्डर पर आपकी कुल बचत: ₹$totalSavings\n"
+                      textSize = 14f
+                      setTypeface(null, Typeface.BOLD)
+                      setTextColor(Color.parseColor("#1F2937"))
+                  }
+
+                  val nameInput = EditText(this).apply {
+                      hint = "आपका पूरा नाम (Customer Name)"
+                      setText(prefs.getString("last_cust_name", ""))
+                  }
+
+                  val phoneInput = EditText(this).apply {
+                      hint = "मोबाइल नंबर (10 अंकों का नंबर)"
+                      inputType = InputType.TYPE_CLASS_PHONE
+                      setText(prefs.getString("last_cust_phone", ""))
+                  }
+
+                  val addressInput = EditText(this).apply {
+                      hint = "पूरा पता / गांव / मोहल्ला / लैंडमार्क"
+                      setText(prefs.getString("last_cust_address", ""))
+                  }
+
+                  val paymentGroup = RadioGroup(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(0, dp(8), 0, dp(8))
+                  }
+
+                  val rbCod = RadioButton(this).apply {
+                      id = 101
+                      text = "💵 कैश ऑन डिलीवरी (सामान मिलने पर पैसे दें)"
+                      isChecked = true
+                  }
+
+                  val rbUpi = RadioButton(this).apply {
+                      id = 102
+                      text = "📱 ऑनलाइन UPI पेमेंट (PhonePe / GPay / Paytm)"
+                  }
+
+                  paymentGroup.addView(rbCod)
+                  paymentGroup.addView(rbUpi)
+
+                  container.addView(couponBtn)
+                  container.addView(billBox)
+                  container.addView(nameInput)
+                  container.addView(phoneInput)
+                  container.addView(addressInput)
+                  container.addView(paymentGroup)
+
+                  val dialog = AlertDialog.Builder(this)
+                      .setTitle("🛒 आपका शॉपिंग कार्ट और चेकआउट")
+                      .setView(scroll)
+                      .setPositiveButton("✅ ऑर्डर कन्फर्म करें (₹$grandTotal)", null)
+                      .setNegativeButton("थोड़ा और सामान जोड़ें", null)
+                      .setNeutralButton("🗑️ कार्ट खाली करें") { _, _ ->
+                          cart.clear()
+                          refreshProductList()
+                          updateCartBar()
+                      }
+                      .create()
+
+                  dialog.setOnShowListener {
+                      val confirmBtn = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                      confirmBtn.setOnClickListener {
+                          val cName = nameInput.text.toString().trim()
+                          val cPhone = phoneInput.text.toString().trim()
+                          val cAddr = addressInput.text.toString().trim()
+
+                          if (cName.isEmpty() || cPhone.isEmpty() || cAddr.isEmpty()) {
+                              Toast.makeText(this, "कृपया नाम, मोबाइल नंबर और पूरा पता भरें!", Toast.LENGTH_SHORT).show()
+                              return@setOnClickListener
+                          }
+
+                          prefs.edit()
+                              .putString("last_cust_name", cName)
+                              .putString("last_cust_phone", cPhone)
+                              .putString("last_cust_address", cAddr)
+                              .apply()
+
+                          val payMode = if (rbUpi.isChecked) "Online UPI" else "Cash on Delivery (COD)"
+                          dialog.dismiss()
+                          placeOrder(cName, cPhone, cAddr, payMode, grandTotal, summaryLines.joinToString("\n"))
+                      }
+                  }
+
+                  dialog.show()
+              }
+
+              private fun placeOrder(
+                  customerName: String,
+                  customerPhone: String,
+                  customerAddress: String,
+                  paymentMode: String,
+                  grandTotal: Int,
+                  itemsSummary: String
+              ) {
+                  val orderId = "ORD-" + (1000..9999).random()
+                  val now = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date())
+
+                  val newOrder = OrderRecord(
+                      orderId = orderId,
+                      itemsSummary = itemsSummary,
+                      totalAmount = grandTotal,
+                      customerName = customerName,
+                      customerPhone = customerPhone,
+                      address = customerAddress,
+                      paymentMode = paymentMode,
+                      time = now,
+                      statusIndex = 0
+                  )
+
+                  orders.add(0, newOrder)
+                  saveOrdersToPrefs()
+
+                  cart.clear()
+                  couponApplied = false
+                  refreshProductList()
+                  updateCartBar()
+
+                  AlertDialog.Builder(this)
+                      .setTitle("🎉 ऑर्डर सफलतापूर्वक बुक हो गया! ($orderId)")
+                      .setMessage(
+                          "धन्यवाद $customerName!\n\n" +
+                                  "आपका ऑर्डर नंबर: $orderId\n" +
+                                  "कुल राशि: ₹$grandTotal ($paymentMode)\n" +
+                                  "डिलीवरी पता: $customerAddress\n\n" +
+                                  "नीचे बटन दबाकर अपना ऑर्डर सीधे दुकानदार के WhatsApp पर भेजें या लाइव ट्रैक करें:"
+                      )
+                      .setPositiveButton("📲 WhatsApp पर ऑर्डर भेजें") { _, _ ->
+                          sendOrderToWhatsApp(newOrder)
+                      }
+                      .setNeutralButton("📍 लाइव ऑर्डर ट्रैक करें") { _, _ ->
+                          showOrdersDialog()
+                      }
+                      .setNegativeButton("📱 UPI पेमेंट करें") { _, _ ->
+                          launchUpiPayment(grandTotal, orderId)
+                      }
+                      .show()
+              }
+
+              private fun sendOrderToWhatsApp(order: OrderRecord) {
+                  val ownerPhone = prefs.getString("owner_whatsapp", "")?.trim() ?: ""
+                  val shopName = prefs.getString("shop_name", "अपना सुपर बाज़ार") ?: "अपना सुपर बाज़ार"
+
+                  val msg = "🛍️ *नया ऑर्डर आया है - $shopName*\n" +
+                          "━━━━━━━━━━━━━━━\n" +
+                          "🆔 *ऑर्डर ID:* ${order.orderId}\n" +
+                          "👤 *ग्राहक:* ${order.customerName}\n" +
+                          "📞 *मोबाइल:* ${order.customerPhone}\n" +
+                          "📍 *पता:* ${order.address}\n" +
+                          "💳 *पेमेंट:* ${order.paymentMode}\n" +
+                          "━━━━━━━━━━━━━━━\n" +
+                          "📦 *सामान की लिस्ट:*\n${order.itemsSummary}\n" +
+                          "━━━━━━━━━━━━━━━\n" +
+                          "💰 *कुल बिल राशि: ₹${order.totalAmount}*"
+
+                  try {
+                      val encoded = Uri.encode(msg)
+                      val url = if (ownerPhone.isNotEmpty()) {
+                          "https://api.whatsapp.com/send?phone=$ownerPhone&text=$encoded"
+                      } else {
+                          "https://api.whatsapp.com/send?text=$encoded"
+                      }
+                      startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                  } catch (e: Exception) {
+                      Toast.makeText(this, "WhatsApp नहीं खुल सका: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                  }
+              }
+
+              private fun launchUpiPayment(amount: Int, orderId: String) {
+                  val upiId = prefs.getString("owner_upi", "")?.trim() ?: ""
+                  val shopName = prefs.getString("shop_name", "SuperBazaar") ?: "SuperBazaar"
+
+                  if (upiId.isEmpty()) {
+                      Toast.makeText(
+                          this,
+                          "मालिक पैनल (👑) में अभी UPI ID सेट नहीं है। आप Cash on Delivery दे सकते हैं!",
+                          Toast.LENGTH_LONG
+                      ).show()
+                      return
+                  }
+
+                  try {
+                      val uri = Uri.parse("upi://pay").buildUpon()
+                          .appendQueryParameter("pa", upiId)
+                          .appendQueryParameter("pn", shopName)
+                          .appendQueryParameter("tn", "Order $orderId")
+                          .appendQueryParameter("am", amount.toString())
+                          .appendQueryParameter("cu", "INR")
+                          .build()
+
+                      val intent = Intent(Intent.ACTION_VIEW, uri)
+                      startActivity(Intent.createChooser(intent, "UPI ऐप चुनें (PhonePe / GPay / Paytm)"))
+                  } catch (e: Exception) {
+                      Toast.makeText(this, "आपके फोन में कोई UPI ऐप नहीं मिला", Toast.LENGTH_SHORT).show()
+                  }
+              }
+
+              private fun showOrdersDialog() {
+                  if (orders.isEmpty()) {
+                      Toast.makeText(this, "अभी तक कोई ऑर्डर नहीं किया गया है!", Toast.LENGTH_SHORT).show()
+                      return
+                  }
+
+                  val stages = listOf(
+                      "1️⃣ ऑर्डर कन्फर्म हो गया है (Order Placed)",
+                      "2️⃣ खाना/सामान पैक हो रहा है (Packing)",
+                      "3️⃣ डिलीवरी पार्टनर रास्ते में है (Out for Delivery)",
+                      "4️⃣ सफलतापूर्वक डिलीवर हो गया (Delivered ✅)"
+                  )
+
+                  val scroll = ScrollView(this)
+                  val container = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(16), dp(12), dp(16), dp(12))
+                  }
+                  scroll.addView(container)
+
+                  for (ord in orders) {
+                      val box = LinearLayout(this).apply {
+                          orientation = LinearLayout.VERTICAL
+                          background = createBg("#F9FAFB", 10, "#D1D5DB", 1)
+                          setPadding(dp(12), dp(10), dp(12), dp(10))
+                          val lp = LinearLayout.LayoutParams(
+                              ViewGroup.LayoutParams.MATCH_PARENT,
+                              ViewGroup.LayoutParams.WRAP_CONTENT
+                          )
+                          lp.bottomMargin = dp(10)
+                          layoutParams = lp
+                      }
+
+                      val stageText = stages[ord.statusIndex.coerceIn(0, stages.size - 1)]
+
+                      val info = TextView(this).apply {
+                          text = "🆔 ${ord.orderId}  •  ${ord.time}\n" +
+                                  "👤 ${ord.customerName} (${ord.customerPhone})\n" +
+                                  "📍 पता: ${ord.address}\n" +
+                                  "${ord.itemsSummary}\n" +
+                                  "💰 कुल बिल: ₹${ord.totalAmount} (${ord.paymentMode})\n\n" +
+                                  "🚚 लाइव स्टेटस: $stageText"
+                          textSize = 13f
+                          setTextColor(Color.parseColor("#111827"))
+                      }
+
+                      val waBtn = Button(this).apply {
+                          text = "📲 यह ऑर्डर WhatsApp पर भेजें"
+                          setOnClickListener { sendOrderToWhatsApp(ord) }
+                      }
+
+                      box.addView(info)
+                      box.addView(waBtn)
+                      container.addView(box)
+                  }
+
+                  AlertDialog.Builder(this)
+                      .setTitle("📦 लाइव ऑर्डर ट्रैकिंग (My Orders)")
+                      .setView(scroll)
+                      .setPositiveButton("बंद करें", null)
+                      .show()
+              }
+
+              // 👑 OWNER CONTROL CENTER (मालिक का कंट्रोल पैनल)
+              private fun showAdminPinDialog() {
+                  val savedPin = prefs.getString("admin_pin", "1234") ?: "1234"
+
+                  val pinInput = EditText(this).apply {
+                      hint = "मालिक पिन डालें (डिफ़ॉल्ट पिन: 1234)"
+                      inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
+                      setPadding(dp(20), dp(16), dp(20), dp(16))
+                  }
+
+                  AlertDialog.Builder(this)
+                      .setTitle("👑 मालिक कंट्रोल सेंटर लॉगिन")
+                      .setMessage("इस ऐप के मालिक के रूप में दुकान की सेटिंग्स, सामान और रेट बदलने के लिए अपना पिन डालें (पहली बार पिन 1234 है):")
+                      .setView(pinInput)
+                      .setPositiveButton("अनलॉक करें") { _, _ ->
+                          if (pinInput.text.toString().trim() == savedPin) {
+                              showAdminDashboardDialog()
+                          } else {
+                              Toast.makeText(this, "❌ गलत पिन! डिफ़ॉल्ट पिन 1234 है।", Toast.LENGTH_SHORT).show()
+                          }
+                      }
+                      .setNegativeButton("रद्द करें", null)
+                      .show()
+              }
+
+              private fun showAdminDashboardDialog() {
+                  val options = arrayOf(
+                      "➕ 1. नया खाना या सामान ऐप में जोड़ें (Add Item)",
+                      "🏪 2. दुकान का नाम, WhatsApp नंबर और UPI ID सेट करें",
+                      "🚚 3. ग्राहकों के ऑर्डर का लाइव स्टेटस बदलें (Update Order Status)",
+                      "🗑️ 4. कोई पुराना सामान लिस्ट से हटाएं (Delete Item)",
+                      "🔄 5. डिफ़ॉल्ट 10 सामान वापस रीसेट करें (Reset Catalog)"
+                  )
+
+                  AlertDialog.Builder(this)
+                      .setTitle("👑 मालिक कंट्रोल सेंटर (Owner Panel)")
+                      .setItems(options) { _, which ->
+                          when (which) {
+                              0 -> showAddProductDialog()
+                              1 -> showShopSettingsDialog()
+                              2 -> showAdminOrderStatusDialog()
+                              3 -> showDeleteProductDialog()
+                              4 -> {
+                                  seedDefaultProducts()
+                                  saveProductsToPrefs()
+                                  refreshProductList()
+                                  Toast.makeText(this, "✅ डिफ़ॉल्ट सामान रीसेट हो गया!", Toast.LENGTH_SHORT).show()
+                              }
+                          }
+                      }
+                      .setNegativeButton("बाहर निकलें", null)
+                      .show()
+              }
+
+              private fun showShopSettingsDialog() {
+                  val scroll = ScrollView(this)
+                  val layout = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(18), dp(12), dp(18), dp(12))
+                  }
+                  scroll.addView(layout)
+
+                  val shopInput = EditText(this).apply {
+                      hint = "आपकी दुकान या ऐप का नाम"
+                      setText(prefs.getString("shop_name", "अपना सुपर बाज़ार & फूड हब"))
+                  }
+
+                  val waInput = EditText(this).apply {
+                      hint = "आपका WhatsApp नंबर (91 के साथ, जैसे 919876543210)"
+                      inputType = InputType.TYPE_CLASS_PHONE
+                      setText(prefs.getString("owner_whatsapp", ""))
+                  }
+
+                  val upiInput = EditText(this).apply {
+                      hint = "आपकी UPI ID (जैसे yourname@ybl)"
+                      setText(prefs.getString("owner_upi", ""))
+                  }
+
+                  val freeLimitInput = EditText(this).apply {
+                      hint = "कितने रुपये से ऊपर फ्री डिलीवरी देनी है? (जैसे 299)"
+                      inputType = InputType.TYPE_CLASS_NUMBER
+                      setText(prefs.getInt("free_delivery_limit", 299).toString())
+                  }
+
+                  val pinInput = EditText(this).apply {
+                      hint = "नया मालिक पिन (डिफ़ॉल्ट: 1234)"
+                      inputType = InputType.TYPE_CLASS_NUMBER
+                      setText(prefs.getString("admin_pin", "1234"))
+                  }
+
+                  layout.addView(shopInput)
+                  layout.addView(waInput)
+                  layout.addView(upiInput)
+                  layout.addView(freeLimitInput)
+                  layout.addView(pinInput)
+
+                  AlertDialog.Builder(this)
+                      .setTitle("🏪 दुकान और पेमेंट सेटिंग्स")
+                      .setView(scroll)
+                      .setPositiveButton("💾 सेव करें") { _, _ ->
+                          prefs.edit()
+                              .putString("shop_name", shopInput.text.toString().trim().ifEmpty { "अपना सुपर बाज़ार" })
+                              .putString("owner_whatsapp", waInput.text.toString().trim())
+                              .putString("owner_upi", upiInput.text.toString().trim())
+                              .putInt("free_delivery_limit", freeLimitInput.text.toString().toIntOrNull() ?: 299)
+                              .putString("admin_pin", pinInput.text.toString().trim().ifEmpty { "1234" })
+                              .apply()
+                          refreshProductList()
+                          Toast.makeText(this, "✅ आपकी दुकान की सेटिंग्स सेव हो गईं!", Toast.LENGTH_SHORT).show()
+                      }
+                      .setNegativeButton("रद्द करें", null)
+                      .show()
+              }
+
+              private fun showAddProductDialog() {
+                  val scroll = ScrollView(this)
+                  val layout = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(18), dp(12), dp(18), dp(12))
+                  }
+                  scroll.addView(layout)
+
+                  val nameInput = EditText(this).apply {
+                      hint = "सामान या डिश का नाम (जैसे: समोसा कचौरी या चीनी 1 Kg)"
+                  }
+
+                  val catSpinner = Spinner(this).apply {
+                      val prodCats = arrayOf("🍔 फूड (Food)", "🥦 किराना (Grocery)", "🛍️ शॉपिंग (Store)")
+                      adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, prodCats)
+                  }
+
+                  val priceInput = EditText(this).apply {
+                      hint = "बिक्री कीमत (Selling Price ₹, जैसे 120)"
+                      inputType = InputType.TYPE_CLASS_NUMBER
+                  }
+
+                  val mrpInput = EditText(this).apply {
+                      hint = "MRP कीमत (छूट दिखाने के लिए, जैसे 150)"
+                      inputType = InputType.TYPE_CLASS_NUMBER
+                  }
+
+                  val timeInput = EditText(this).apply {
+                      hint = "डिलीवरी समय (जैसे: 20 mins या Same Day)"
+                      setText("25 mins")
+                  }
+
+                  val emojiInput = EditText(this).apply {
+                      hint = "आइकन इमोजी (जैसे 🍕, 🥛, 📱, 🛍️)"
+                      setText("🍲")
+                  }
+
+                  val descInput = EditText(this).apply {
+                      hint = "सामान का विवरण (जैसे: ताज़ा और शुद्ध)"
+                  }
+
+                  layout.addView(nameInput)
+                  layout.addView(catSpinner)
+                  layout.addView(priceInput)
+                  layout.addView(mrpInput)
+                  layout.addView(timeInput)
+                  layout.addView(emojiInput)
+                  layout.addView(descInput)
+
+                  AlertDialog.Builder(this)
+                      .setTitle("➕ नया खाना या सामान जोड़ें")
+                      .setView(scroll)
+                      .setPositiveButton("ऐप में जोड़ें") { _, _ ->
+                          val name = nameInput.text.toString().trim()
+                          val price = priceInput.text.toString().toIntOrNull() ?: 0
+                          val mrp = mrpInput.text.toString().toIntOrNull() ?: price
+                          if (name.isEmpty() || price <= 0) {
+                              Toast.makeText(this, "कृपया नाम और सही कीमत डालें!", Toast.LENGTH_SHORT).show()
+                              return@setPositiveButton
+                          }
+
+                          val newProd = Product(
+                              id = "p_" + System.currentTimeMillis(),
+                              name = name,
+                              category = catSpinner.selectedItem.toString(),
+                              price = price,
+                              mrp = maxOf(price, mrp),
+                              time = timeInput.text.toString().trim().ifEmpty { "25 mins" },
+                              rating = "4.8",
+                              desc = descInput.text.toString().trim().ifEmpty { "बेस्ट क्वालिटी और ताज़ा होम डिलीवरी" },
+                              emoji = emojiInput.text.toString().trim().ifEmpty { "🛍️" }
+                          )
+
+                          products.add(0, newProd)
+                          saveProductsToPrefs()
+                          refreshProductList()
+                          Toast.makeText(this, "✅ '$name' आपकी दुकान में जुड़ गया!", Toast.LENGTH_SHORT).show()
+                      }
+                      .setNegativeButton("रद्द करें", null)
+                      .show()
+              }
+
+              private fun showDeleteProductDialog() {
+                  if (products.isEmpty()) return
+                  val names = products.map { "${it.emoji} ${it.name} (₹${it.price})" }.toTypedArray()
+
+                  AlertDialog.Builder(this)
+                      .setTitle("🗑️ हटाने के लिए सामान चुनें")
+                      .setItems(names) { _, which ->
+                          val removed = products.removeAt(which)
+                          cart.remove(removed.id)
+                          saveProductsToPrefs()
+                          refreshProductList()
+                          updateCartBar()
+                          Toast.makeText(this, "🗑️ '${removed.name}' हटा दिया गया", Toast.LENGTH_SHORT).show()
+                      }
+                      .setNegativeButton("रद्द करें", null)
+                      .show()
+              }
+
+              private fun showAdminOrderStatusDialog() {
+                  if (orders.isEmpty()) {
+                      Toast.makeText(this, "अभी कोई ऑर्डर नहीं है!", Toast.LENGTH_SHORT).show()
+                      return
+                  }
+
+                  val listLabels = orders.map { "${it.orderId} - ${it.customerName} (₹${it.totalAmount})" }.toTypedArray()
+                  AlertDialog.Builder(this)
+                      .setTitle("🚚 किस ऑर्डर का स्टेटस बदलना है?")
+                      .setItems(listLabels) { _, idx ->
+                          val ord = orders[idx]
+                          val stages = arrayOf(
+                              "1️⃣ ऑर्डर कन्फर्म (Order Placed)",
+                              "2️⃣ पैकिंग चल रही है (Packing)",
+                              "3️⃣ डिलीवरी के लिए निकला (Out for Delivery)",
+                              "4️⃣ डिलीवर हो गया (Delivered ✅)"
+                          )
+                          AlertDialog.Builder(this)
+                              .setTitle("${ord.orderId} का नया स्टेटस चुनें")
+                              .setItems(stages) { _, stageIdx ->
+                                  ord.statusIndex = stageIdx
+                                  saveOrdersToPrefs()
+                                  Toast.makeText(this, "✅ ऑर्डर स्टेटस अपडेट हो गया!", Toast.LENGTH_SHORT).show()
+                              }
+                              .show()
+                      }
+                      .show()
+              }
+          }
+          EOF
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.4'
+
+      - name: Build Debug APK
+        run: gradle assembleDebug --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SuperBazaar-Shopping-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
